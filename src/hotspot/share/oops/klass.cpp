@@ -61,10 +61,6 @@ void Klass::set_java_mirror(Handle m) {
   _java_mirror = class_loader_data()->add_handle(m);
 }
 
-oop Klass::java_mirror_no_keepalive() const {
-  return _java_mirror.peek();
-}
-
 bool Klass::is_cloneable() const {
   return _access_flags.is_cloneable_fast() ||
          is_subtype_of(vmClasses::Cloneable_klass());
@@ -195,11 +191,22 @@ void* Klass::operator new(size_t size, ClassLoaderData* loader_data, size_t word
   return Metaspace::allocate(loader_data, word_size, MetaspaceObj::ClassType, THREAD);
 }
 
+static markWord make_prototype(Klass* kls) {
+  markWord prototype = markWord::prototype();
+#ifdef _LP64
+  if (UseCompactObjectHeaders) {
+    prototype = prototype.set_klass(kls);
+  }
+#endif
+  return prototype;
+}
+
 // "Normal" instantiation is preceded by a MetaspaceObj allocation
 // which zeros out memory - calloc equivalent.
 // The constructor is also used from CppVtableCloner,
 // which doesn't zero out the memory before calling the constructor.
 Klass::Klass(KlassKind kind) : _kind(kind),
+                           _prototype_header(make_prototype(this)),
                            _shared_class_path_index(-1) {
   CDS_ONLY(_shared_class_flags = 0;)
   CDS_JAVA_HEAP_ONLY(_archived_mirror_index = -1;)
@@ -744,6 +751,10 @@ void Klass::oop_print_on(oop obj, outputStream* st) {
      // print header
      obj->mark().print_on(st);
      st->cr();
+     if (UseCompactObjectHeaders) {
+       st->print(BULLET"prototype_header: " INTPTR_FORMAT, _prototype_header.value());
+       st->cr();
+     }
   }
 
   // print class

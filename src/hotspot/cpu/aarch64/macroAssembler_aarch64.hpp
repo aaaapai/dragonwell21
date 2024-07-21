@@ -849,9 +849,11 @@ public:
   void load_method_holder(Register holder, Register method);
 
   // oop manipulations
+  void load_nklass_compact(Register dst, Register src);
   void load_klass(Register dst, Register src);
   void store_klass(Register dst, Register src);
   void cmp_klass(Register oop, Register trial_klass, Register tmp);
+  void cmp_klass(Register src, Register dst, Register tmp1, Register tmp2);
 
   void resolve_weak_handle(Register result, Register tmp1, Register tmp2);
   void resolve_oop_handle(Register result, Register tmp1, Register tmp2);
@@ -941,6 +943,15 @@ public:
                                Register scan_temp,
                                Label& no_such_interface,
                    bool return_method = true);
+
+  void lookup_interface_method_stub(Register recv_klass,
+                                    Register holder_klass,
+                                    Register resolved_klass,
+                                    Register method_result,
+                                    Register temp_reg,
+                                    Register temp_reg2,
+                                    int itable_index,
+                                    Label& L_no_such_interface);
 
   // virtual method calling
   // n.b. x86 allows RegisterOrConstant for vtable_index

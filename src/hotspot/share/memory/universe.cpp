@@ -319,8 +319,13 @@ void Universe::genesis(TRAPS) {
   HandleMark   hm(THREAD);
 
   // Explicit null checks are needed if these offsets are not smaller than the page size
-  assert(oopDesc::klass_offset_in_bytes() < static_cast<intptr_t>(os::vm_page_size()),
-         "Klass offset is expected to be less than the page size");
+  if (UseCompactObjectHeaders) {
+    assert(oopDesc::mark_offset_in_bytes() < static_cast<intptr_t>(os::vm_page_size()),
+           "Mark offset is expected to be less than the page size");
+  } else {
+    assert(oopDesc::klass_offset_in_bytes() < static_cast<intptr_t>(os::vm_page_size()),
+           "Klass offset is expected to be less than the page size");
+  }
   assert(arrayOopDesc::length_offset_in_bytes() < static_cast<intptr_t>(os::vm_page_size()),
          "Array length offset is expected to be less than the page size");
 
@@ -335,7 +340,7 @@ void Universe::genesis(TRAPS) {
       // Initialization of the fillerArrayKlass must come before regular
       // int-TypeArrayKlass so that the int-Array mirror points to the
       // int-TypeArrayKlass.
-      _fillerArrayKlassObj = TypeArrayKlass::create_klass(T_INT, "Ljdk/internal/vm/FillerArray;", CHECK);
+      _fillerArrayKlassObj = TypeArrayKlass::create_klass(T_INT, "[Ljdk/internal/vm/FillerElement;", CHECK);
       for (int i = T_BOOLEAN; i < T_LONG+1; i++) {
         _typeArrayKlassObjs[i] = TypeArrayKlass::create_klass((BasicType)i, CHECK);
       }

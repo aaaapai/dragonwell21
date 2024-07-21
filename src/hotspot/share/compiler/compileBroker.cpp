@@ -1772,17 +1772,22 @@ bool CompileBroker::init_compiler_runtime() {
   return true;
 }
 
+void CompileBroker::free_buffer_blob_if_allocated(CompilerThread* thread) {
+  BufferBlob* blob = thread->get_buffer_blob();
+  if (blob != nullptr) {
+    blob->purge(true /* free_code_cache_data */, true /* unregister_nmethod */);
+    MutexLocker mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+    CodeCache::free(blob);
+  }
+}
+
 /**
  * If C1 and/or C2 initialization failed, we shut down all compilation.
  * We do this to keep things simple. This can be changed if it ever turns
  * out to be a problem.
  */
 void CompileBroker::shutdown_compiler_runtime(AbstractCompiler* comp, CompilerThread* thread) {
-  // Free buffer blob, if allocated
-  if (thread->get_buffer_blob() != nullptr) {
-    MutexLocker mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
-    CodeCache::free(thread->get_buffer_blob());
-  }
+  free_buffer_blob_if_allocated(thread);
 
   if (comp->should_perform_shutdown()) {
     // There are two reasons for shutting down the compiler
@@ -1921,11 +1926,7 @@ void CompileBroker::compiler_thread_loop() {
           // Notify compiler that the compiler thread is about to stop
           thread->compiler()->stopping_compiler_thread(thread);
 
-          // Free buffer blob, if allocated
-          if (thread->get_buffer_blob() != nullptr) {
-            MutexLocker mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
-            CodeCache::free(thread->get_buffer_blob());
-          }
+          free_buffer_blob_if_allocated(thread);
           return; // Stop this thread.
         }
       }
@@ -2288,7 +2289,9 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
     compilable = ci_env.compilable();
 
     if (ci_env.failing()) {
-      failure_reason = ci_env.failure_reason();
+      // Duplicate the failure reason string, so that it outlives ciEnv
+      failure_reason = os::strdup(ci_env.failure_reason(), mtCompiler);
+      failure_reason_on_C_heap = true;
       retry_message = ci_env.retry_message();
       ci_env.report_failure(failure_reason);
     }

@@ -363,8 +363,19 @@ class MacroAssembler: public Assembler {
   void load_method_holder(Register holder, Register method);
 
   // oop manipulations
+#ifdef _LP64
+  void load_nklass_compact(Register dst, Register src);
+#endif
   void load_klass(Register dst, Register src, Register tmp);
   void store_klass(Register dst, Register src, Register tmp);
+
+  // Compares the Klass pointer of an object to a given Klass (which might be narrow,
+  // depending on UseCompressedClassPointers).
+  void cmp_klass(Register klass, Register dst, Register tmp);
+
+  // Compares the Klass pointer of two objects o1 and o2. Result is in the condition flags.
+  // Uses tmp1 and tmp2 as temporary registers.
+  void cmp_klass(Register src, Register dst, Register tmp1, Register tmp2);
 
   void access_load_at(BasicType type, DecoratorSet decorators, Register dst, Address src,
                       Register tmp1, Register thread_tmp);
@@ -876,6 +887,7 @@ public:
 
   void testptr(Register src, int32_t imm32) {  LP64_ONLY(testq(src, imm32)) NOT_LP64(testl(src, imm32)); }
   void testptr(Register src1, Address src2) { LP64_ONLY(testq(src1, src2)) NOT_LP64(testl(src1, src2)); }
+  void testptr(Address src, int32_t imm32) {  LP64_ONLY(testq(src, imm32)) NOT_LP64(testl(src, imm32)); }
   void testptr(Register src1, Register src2);
 
   void xorptr(Register dst, Register src) { LP64_ONLY(xorq(dst, src)) NOT_LP64(xorl(dst, src)); }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2024, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2014, 2020, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -282,7 +282,8 @@ void LIR_Assembler::osr_entry() {
         __ bind(L);
       }
 #endif
-      __ ldp(r19, r20, Address(OSR_buf, slot_offset));
+      __ ldr(r19, Address(OSR_buf, slot_offset));
+      __ ldr(r20, Address(OSR_buf, slot_offset + BytesPerWord));
       __ str(r19, frame_map()->address_for_monitor_lock(i));
       __ str(r20, frame_map()->address_for_monitor_object(i));
     }
@@ -1229,7 +1230,7 @@ void LIR_Assembler::emit_alloc_array(LIR_OpAllocArray* op) {
                       len,
                       tmp1,
                       tmp2,
-                      arrayOopDesc::header_size(op->type()),
+                      arrayOopDesc::base_offset_in_bytes(op->type()),
                       array_element_size(op->type()),
                       op->klass()->as_register(),
                       *op->stub()->entry());
@@ -2351,7 +2352,9 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
     // We don't know the array types are compatible
     if (basic_type != T_OBJECT) {
       // Simple test for basic type arrays
-      if (UseCompressedClassPointers) {
+      if (UseCompactObjectHeaders) {
+        __ cmp_klass(src, dst, tmp, rscratch1);
+      } else if (UseCompressedClassPointers) {
         __ ldrw(tmp, src_klass_addr);
         __ ldrw(rscratch1, dst_klass_addr);
         __ cmpw(tmp, rscratch1);
@@ -2481,13 +2484,15 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
     // but not necessarily exactly of type default_type.
     Label known_ok, halt;
     __ mov_metadata(tmp, default_type->constant_encoding());
-    if (UseCompressedClassPointers) {
+    if (!UseCompactObjectHeaders && UseCompressedClassPointers) {
       __ encode_klass_not_null(tmp);
     }
 
     if (basic_type != T_OBJECT) {
 
-      if (UseCompressedClassPointers) {
+      if (UseCompactObjectHeaders) {
+        __ cmp_klass(dst, tmp, rscratch1);
+      } else if (UseCompressedClassPointers) {
         __ ldrw(rscratch1, dst_klass_addr);
         __ cmpw(tmp, rscratch1);
       } else {
@@ -2495,7 +2500,9 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
         __ cmp(tmp, rscratch1);
       }
       __ br(Assembler::NE, halt);
-      if (UseCompressedClassPointers) {
+      if (UseCompactObjectHeaders) {
+        __ cmp_klass(src, tmp, rscratch1);
+      } else if (UseCompressedClassPointers) {
         __ ldrw(rscratch1, src_klass_addr);
         __ cmpw(tmp, rscratch1);
       } else {
@@ -2504,7 +2511,9 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
       }
       __ br(Assembler::EQ, known_ok);
     } else {
-      if (UseCompressedClassPointers) {
+      if (UseCompactObjectHeaders) {
+        __ cmp_klass(dst, tmp, rscratch1);
+      } else if (UseCompressedClassPointers) {
         __ ldrw(rscratch1, dst_klass_addr);
         __ cmpw(tmp, rscratch1);
       } else {
@@ -2592,7 +2601,18 @@ void LIR_Assembler::emit_load_klass(LIR_OpLoadKlass* op) {
   }
 
   if (UseCompressedClassPointers) {
-    __ ldrw(result, Address (obj, oopDesc::klass_offset_in_bytes()));
+    if (UseCompactObjectHeaders) {
+      // Check if we can take the (common) fast path, if obj is unlocked.
+      __ ldr(result, Address(obj, oopDesc::mark_offset_in_bytes()));
+      __ tst(result, markWord::monitor_value);
+      __ br(Assembler::NE, *op->stub()->entry());
+      __ bind(*op->stub()->continuation());
+
+      // Shift to get proper narrow Klass*.
+      __ lsr(result, result, markWord::klass_shift);
+    } else {
+      __ ldrw(result, Address (obj, oopDesc::klass_offset_in_bytes()));
+    }
     __ decode_klass_not_null(result);
   } else {
     __ ldr(result, Address (obj, oopDesc::klass_offset_in_bytes()));
@@ -2723,7 +2743,10 @@ void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
   __ verify_oop(obj);
 
   if (tmp != obj) {
+    assert_different_registers(obj, tmp, rscratch1, rscratch2, mdo_addr.base(), mdo_addr.index());
     __ mov(tmp, obj);
+  } else {
+    assert_different_registers(obj, rscratch1, rscratch2, mdo_addr.base(), mdo_addr.index());
   }
   if (do_null) {
     __ cbnz(tmp, update);
@@ -2780,10 +2803,11 @@ void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
           __ cbz(rscratch2, none);
           __ cmp(rscratch2, (u1)TypeEntries::null_seen);
           __ br(Assembler::EQ, none);
-          // There is a chance that the checks above (re-reading profiling
-          // data from memory) fail if another thread has just set the
+          // There is a chance that the checks above
+          // fail if another thread has just set the
           // profiling to this obj's klass
           __ dmb(Assembler::ISHLD);
+          __ eor(tmp, tmp, rscratch2); // get back original value before XOR
           __ ldr(rscratch2, mdo_addr);
           __ eor(tmp, tmp, rscratch2);
           __ andr(rscratch1, tmp, TypeEntries::type_klass_mask);
@@ -2808,6 +2832,10 @@ void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
         __ bind(none);
         // first time here. Set profile type.
         __ str(tmp, mdo_addr);
+#ifdef ASSERT
+        __ andr(tmp, tmp, TypeEntries::type_mask);
+        __ verify_klass_ptr(tmp);
+#endif
       }
     } else {
       // There's a single possible klass at this profile point
@@ -2839,6 +2867,10 @@ void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
 #endif
         // first time here. Set profile type.
         __ str(tmp, mdo_addr);
+#ifdef ASSERT
+        __ andr(tmp, tmp, TypeEntries::type_mask);
+        __ verify_klass_ptr(tmp);
+#endif
       } else {
         assert(ciTypeEntries::valid_ciklass(current_klass) != nullptr &&
                ciTypeEntries::valid_ciklass(current_klass) != exact_klass, "inconsistent");

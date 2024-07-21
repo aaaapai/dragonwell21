@@ -24,9 +24,6 @@
 
 #include "precompiled.hpp"
 #include "classfile/classLoaderDataGraph.hpp"
-#include "classfile/systemDictionary.hpp"
-#include "code/codeCache.hpp"
-#include "compiler/oopMap.hpp"
 #include "gc/g1/g1CollectedHeap.hpp"
 #include "gc/g1/g1FullCollector.inline.hpp"
 #include "gc/g1/g1FullGCAdjustTask.hpp"
@@ -41,7 +38,9 @@
 #include "gc/g1/g1RegionMarkStatsCache.inline.hpp"
 #include "gc/shared/gcTraceTime.inline.hpp"
 #include "gc/shared/preservedMarks.inline.hpp"
+#include "gc/shared/classUnloadingContext.hpp"
 #include "gc/shared/referenceProcessor.hpp"
+#include "gc/shared/slidingForwarding.hpp"
 #include "gc/shared/verifyOption.hpp"
 #include "gc/shared/weakProcessor.inline.hpp"
 #include "gc/shared/workerPolicy.hpp"
@@ -171,6 +170,7 @@ public:
   PrepareRegionsClosure(G1FullCollector* collector) : _collector(collector) { }
 
   bool do_heap_region(HeapRegion* hr) {
+    hr->prepare_for_full_gc();
     G1CollectedHeap::heap()->prepare_region_for_full_compaction(hr);
     _collector->before_marking_update_attribute_table(hr);
     return false;
@@ -210,6 +210,8 @@ void G1FullCollector::collect() {
   // Don't add any more derived pointers during later phases
   deactivate_derived_pointers();
 
+  SlidingForwarding::begin();
+
   phase2_prepare_compaction();
 
   if (has_compaction_targets()) {
@@ -221,6 +223,8 @@ void G1FullCollector::collect() {
     // The live ratio is only considered if do_maximal_compaction is false.
     log_info(gc, phases) ("No Regions selected for compaction. Skipping Phase 3: Adjust pointers and Phase 4: Compact heap");
   }
+
+  SlidingForwarding::end();
 
   phase5_reset_metadata();
 
@@ -318,11 +322,7 @@ void G1FullCollector::phase1_mark_live_objects() {
 
   // Class unloading and cleanup.
   if (ClassUnloading) {
-    GCTraceTime(Debug, gc, phases) debug("Phase 1: Class Unloading and Cleanup", scope()->timer());
-    CodeCache::UnloadingScope unloading_scope(&_is_alive);
-    // Unload classes and purge the SystemDictionary.
-    bool purged_class = SystemDictionary::do_unloading(scope()->timer());
-    _heap->complete_cleaning(purged_class);
+    _heap->unload_classes_and_code("Phase 1: Class Unloading and Cleanup", &_is_alive, scope()->timer());
   }
 
   {
@@ -394,7 +394,8 @@ uint G1FullCollector::truncate_parallel_cps() {
   return lowest_current;
 }
 
-void G1FullCollector::phase2c_prepare_serial_compaction() {
+template <bool ALT_FWD>
+void G1FullCollector::phase2c_prepare_serial_compaction_impl() {
   GCTraceTime(Debug, gc, phases) debug("Phase 2: Prepare serial compaction", scope()->timer());
   // At this point, we know that after parallel compaction there will be regions that
   // are partially compacted into. Thus, the last compaction region of all
@@ -419,7 +420,7 @@ void G1FullCollector::phase2c_prepare_serial_compaction() {
   serial_cp->initialize(start_hr);
 
   HeapWord* dense_prefix_top = compaction_top(start_hr);
-  G1SerialRePrepareClosure re_prepare(serial_cp, dense_prefix_top);
+  G1SerialRePrepareClosure<ALT_FWD> re_prepare(serial_cp, dense_prefix_top);
 
   for (uint i = start_serial + 1; i < _heap->max_reserved_regions(); i++) {
     if (is_compaction_target(i)) {
@@ -432,7 +433,16 @@ void G1FullCollector::phase2c_prepare_serial_compaction() {
   serial_cp->update();
 }
 
-void G1FullCollector::phase2d_prepare_humongous_compaction() {
+void G1FullCollector::phase2c_prepare_serial_compaction() {
+  if (UseAltGCForwarding) {
+    phase2c_prepare_serial_compaction_impl<true>();
+  } else {
+    phase2c_prepare_serial_compaction_impl<false>();
+  }
+}
+
+template <bool ALT_FWD>
+void G1FullCollector::phase2d_prepare_humongous_compaction_impl() {
   GCTraceTime(Debug, gc, phases) debug("Phase 2: Prepare humongous compaction", scope()->timer());
   G1FullGCCompactionPoint* serial_cp = serial_compaction_point();
   assert(serial_cp->has_regions(), "Sanity!" );
@@ -450,7 +460,7 @@ void G1FullCollector::phase2d_prepare_humongous_compaction() {
       region_index++;
       continue;
     } else if (hr->is_starts_humongous()) {
-      uint num_regions = humongous_cp->forward_humongous(hr);
+      uint num_regions = humongous_cp->forward_humongous<ALT_FWD>(hr);
       region_index += num_regions; // Skip over the continues humongous regions.
       continue;
     } else if (is_compaction_target(region_index)) {
@@ -458,6 +468,14 @@ void G1FullCollector::phase2d_prepare_humongous_compaction() {
       humongous_cp->add(hr);
     }
     region_index++;
+  }
+}
+
+void G1FullCollector::phase2d_prepare_humongous_compaction() {
+  if (UseAltGCForwarding) {
+    phase2d_prepare_humongous_compaction_impl<true>();
+  } else {
+    phase2d_prepare_humongous_compaction_impl<false>();
   }
 }
 

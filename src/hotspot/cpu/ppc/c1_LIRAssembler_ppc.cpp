@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2024, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2023 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -2300,7 +2300,7 @@ void LIR_Assembler::emit_alloc_array(LIR_OpAllocArray* op) {
                       op->tmp1()->as_register(),
                       op->tmp2()->as_register(),
                       op->tmp3()->as_register(),
-                      arrayOopDesc::header_size(op->type()),
+                      arrayOopDesc::base_offset_in_bytes(op->type()),
                       type2aelembytes(op->type()),
                       op->klass()->as_register(),
                       *op->stub()->entry());
@@ -2633,6 +2633,13 @@ void LIR_Assembler::emit_compare_and_swap(LIR_OpCompareAndSwap* op) {
     }
   } else {
     Unimplemented();
+  }
+
+  // There might be a volatile load before this Unsafe CAS.
+  if (support_IRIW_for_not_multiple_copy_atomic_cpu) {
+    __ sync();
+  } else {
+    __ lwsync();
   }
 
   if (is_64bit) {
@@ -2996,9 +3003,24 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
   assert(addr->disp() == 0 && addr->index()->is_illegal(), "use leal!");
   const Register Rptr = addr->base()->as_pointer_register(),
                  Rtmp = tmp->as_register();
-  Register Rco = noreg;
-  if (UseCompressedOops && data->is_oop()) {
-    Rco = __ encode_heap_oop(Rtmp, data->as_register());
+  Register Robj = noreg;
+  if (data->is_oop()) {
+    if (UseCompressedOops) {
+      Robj = __ encode_heap_oop(Rtmp, data->as_register());
+    } else {
+      Robj = data->as_register();
+      if (Robj == dest->as_register()) { // May happen with ZGC.
+        __ mr(Rtmp, Robj);
+        Robj = Rtmp;
+      }
+    }
+  }
+
+  // There might be a volatile load before this Unsafe OP.
+  if (support_IRIW_for_not_multiple_copy_atomic_cpu) {
+    __ sync();
+  } else {
+    __ lwsync();
   }
 
   Label Lretry;
@@ -3018,18 +3040,11 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
   } else if (data->is_oop()) {
     assert(code == lir_xchg, "xadd for oops");
     const Register Rold = dest->as_register();
+    assert_different_registers(Rptr, Rold, Robj);
     if (UseCompressedOops) {
-      assert_different_registers(Rptr, Rold, Rco);
       __ lwarx(Rold, Rptr, MacroAssembler::cmpxchgx_hint_atomic_update());
-      __ stwcx_(Rco, Rptr);
+      __ stwcx_(Robj, Rptr);
     } else {
-      Register Robj = data->as_register();
-      assert_different_registers(Rptr, Rold, Rtmp);
-      assert_different_registers(Rptr, Robj, Rtmp);
-      if (Robj == Rold) { // May happen with ZGC.
-        __ mr(Rtmp, Robj);
-        Robj = Rtmp;
-      }
       __ ldarx(Rold, Rptr, MacroAssembler::cmpxchgx_hint_atomic_update());
       __ stdcx_(Robj, Rptr);
     }
@@ -3056,6 +3071,12 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
 
   if (UseCompressedOops && data->is_oop()) {
     __ decode_heap_oop(dest->as_register());
+  }
+
+  if (support_IRIW_for_not_multiple_copy_atomic_cpu) {
+    __ isync();
+  } else {
+    __ sync();
   }
 }
 

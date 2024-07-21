@@ -52,8 +52,17 @@ inline bool Klass::is_loader_alive() const {
   return class_loader_data()->is_alive();
 }
 
+inline void Klass::set_prototype_header(markWord header) {
+  assert(UseCompactObjectHeaders, "only with compact headers");
+  _prototype_header = header;
+}
+
 inline oop Klass::java_mirror() const {
   return _java_mirror.resolve();
+}
+
+inline oop Klass::java_mirror_no_keepalive() const {
+  return _java_mirror.peek();
 }
 
 inline klassVtable Klass::vtable() const {

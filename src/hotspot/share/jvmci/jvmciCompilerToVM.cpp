@@ -52,6 +52,7 @@
 #include "prims/jvmtiExport.hpp"
 #include "prims/methodHandles.hpp"
 #include "prims/nativeLookup.hpp"
+#include "runtime/arguments.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/deoptimization.hpp"
 #include "runtime/fieldDescriptor.inline.hpp"
@@ -584,6 +585,18 @@ C2V_VMENTRY_NULL(jobject, lookupType, (JNIEnv* env, jobject, jstring jname, ARGU
   if (class_name->utf8_length() <= 1) {
     JVMCI_THROW_MSG_0(InternalError, err_msg("Primitive type %s should be handled in Java code", str));
   }
+
+#ifdef ASSERT
+  const char* val = Arguments::PropertyList_get_value(Arguments::system_properties(), "test.jvmci.lookupTypeException");
+  if (val != nullptr) {
+    if (strstr(val, "<trace>") != nullptr) {
+      tty->print_cr("CompilerToVM.lookupType: %s", str);
+    } else if (strstr(val, str) != nullptr) {
+      THROW_MSG_0(vmSymbols::java_lang_Exception(),
+                  err_msg("lookupTypeException: %s", str));
+    }
+  }
+#endif
 
   JVMCIKlassHandle resolved_klass(THREAD);
   Klass* accessing_klass = UNPACK_PAIR(Klass, accessing_klass);
@@ -2373,7 +2386,7 @@ C2V_END
 
 C2V_VMENTRY_0(jint, arrayBaseOffset, (JNIEnv* env, jobject, jchar type_char))
   BasicType type = JVMCIENV->typeCharToBasicType(type_char, JVMCI_CHECK_0);
-  return arrayOopDesc::header_size(type) * HeapWordSize;
+  return arrayOopDesc::base_offset_in_bytes(type);
 C2V_END
 
 C2V_VMENTRY_0(jint, arrayIndexScale, (JNIEnv* env, jobject, jchar type_char))

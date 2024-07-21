@@ -105,7 +105,7 @@ class PSPromotionManager {
 
   void push_depth(ScannerTask task);
 
-  inline void promotion_trace_event(oop new_obj, oop old_obj, size_t obj_size,
+  inline void promotion_trace_event(oop new_obj, Klass* klass, size_t obj_size,
                                     uint age, bool tenured,
                                     const PSPromotionLAB* lab);
 
@@ -177,6 +177,7 @@ class PSPromotionManager {
   TASKQUEUE_STATS_ONLY(inline void record_steal(ScannerTask task);)
 
   void push_contents(oop obj);
+  void push_contents_bounded(oop obj, HeapWord* left, HeapWord* right);
 };
 
 #endif // SHARE_GC_PARALLEL_PSPROMOTIONMANAGER_HPP

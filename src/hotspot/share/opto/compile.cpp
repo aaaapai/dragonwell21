@@ -551,28 +551,37 @@ void Compile::print_compile_messages() {
 
 #ifndef PRODUCT
 void Compile::print_ideal_ir(const char* phase_name) {
-  ttyLocker ttyl;
   // keep the following output all in one block
   // This output goes directly to the tty, not the compiler log.
   // To enable tools to match it up with the compilation activity,
   // be sure to tag this tty output with the compile ID.
+
+  // Node dumping can cause a safepoint, which can break the tty lock.
+  // Buffer all node dumps, so that all safepoints happen before we lock.
+  ResourceMark rm;
+  stringStream ss;
+
+  if (_output == nullptr) {
+    ss.print_cr("AFTER: %s", phase_name);
+    // Print out all nodes in ascending order of index.
+    root()->dump_bfs(MaxNodeLimit, nullptr, "+S$", &ss);
+  } else {
+    // Dump the node blockwise if we have a scheduling
+    _output->print_scheduling(&ss);
+  }
+
+  // Check that the lock is not broken by a safepoint.
+  NoSafepointVerifier nsv;
+  ttyLocker ttyl;
   if (xtty != nullptr) {
     xtty->head("ideal compile_id='%d'%s compile_phase='%s'",
                compile_id(),
                is_osr_compilation() ? " compile_kind='osr'" : "",
                phase_name);
-  }
-  if (_output == nullptr) {
-    tty->print_cr("AFTER: %s", phase_name);
-    // Print out all nodes in ascending order of index.
-    root()->dump_bfs(MaxNodeLimit, nullptr, "+S$");
-  } else {
-    // Dump the node blockwise if we have a scheduling
-    _output->print_scheduling();
-  }
-
-  if (xtty != nullptr) {
+    xtty->print("%s", ss.as_string()); // print to tty would use xml escape encoding
     xtty->tail("ideal");
+  } else {
+    tty->print("%s", ss.as_string());
   }
 }
 #endif
@@ -613,7 +622,6 @@ Compile::Compile( ciEnv* ci_env, ciMethod* target, int osr_bci,
                   _env(ci_env),
                   _directive(directive),
                   _log(ci_env->log()),
-                  _failure_reason(nullptr),
                   _intrinsics        (comp_arena(), 0, 0, nullptr),
                   _macro_nodes       (comp_arena(), 8, 0, nullptr),
                   _parse_predicate_opaqs (comp_arena(), 8, 0, nullptr),
@@ -826,8 +834,8 @@ Compile::Compile( ciEnv* ci_env, ciMethod* target, int osr_bci,
 
   // If any phase is randomized for stress testing, seed random number
   // generation and log the seed for repeatability.
-  if (StressLCM || StressGCM || StressIGVN || StressCCP) {
-    if (FLAG_IS_DEFAULT(StressSeed) || (FLAG_IS_ERGO(StressSeed) && RepeatCompilation)) {
+  if (StressLCM || StressGCM || StressIGVN || StressCCP || StressIncrementalInlining) {
+    if (FLAG_IS_DEFAULT(StressSeed) || (FLAG_IS_ERGO(StressSeed) && directive->RepeatCompilationOption)) {
       _stress_seed = static_cast<uint>(Ticks::now().nanoseconds());
       FLAG_SET_ERGO(StressSeed, _stress_seed);
     } else {
@@ -910,7 +918,6 @@ Compile::Compile( ciEnv* ci_env,
     _env(ci_env),
     _directive(directive),
     _log(ci_env->log()),
-    _failure_reason(nullptr),
     _congraph(nullptr),
     NOT_PRODUCT(_igv_printer(nullptr) COMMA)
     _dead_node_list(comp_arena()),
@@ -1682,6 +1689,10 @@ Compile::AliasType* Compile::find_alias_type(const TypePtr* adr_type, bool no_cr
       }
     }
     if (flat->isa_klassptr()) {
+      if (UseCompactObjectHeaders) {
+        if (flat->offset() == in_bytes(Klass::prototype_header_offset()))
+          alias_type(idx)->set_rewritable(false);
+      }
       if (flat->offset() == in_bytes(Klass::super_check_offset_offset()))
         alias_type(idx)->set_rewritable(false);
       if (flat->offset() == in_bytes(Klass::modifier_flags_offset()))
@@ -1927,7 +1938,7 @@ void Compile::process_for_unstable_if_traps(PhaseIterGVN& igvn) {
         if (!live_locals.at(i) && !local->is_top() && local != lhs && local!= rhs) {
           uint idx = jvms->locoff() + i;
 #ifdef ASSERT
-          if (Verbose) {
+          if (PrintOpto && Verbose) {
             tty->print("[unstable_if] kill local#%d: ", idx);
             local->dump();
             tty->cr();
@@ -2244,7 +2255,7 @@ void Compile::Optimize() {
 
     if (failing())  return;
 
-    if (AlwaysIncrementalInline) {
+    if (AlwaysIncrementalInline || StressIncrementalInlining) {
       inline_incrementally(igvn);
     }
 
@@ -4319,9 +4330,9 @@ void Compile::record_failure(const char* reason) {
   if (log() != nullptr) {
     log()->elem("failure reason='%s' phase='compile'", reason);
   }
-  if (_failure_reason == nullptr) {
+  if (_failure_reason.get() == nullptr) {
     // Record the first failure reason.
-    _failure_reason = reason;
+    _failure_reason.set(reason);
   }
 
   if (!C->failure_reason_is(C2Compiler::retry_no_subsuming_loads())) {
@@ -4900,7 +4911,16 @@ void Compile::remove_speculative_types(PhaseIterGVN &igvn) {
         const Type* t_no_spec = t->remove_speculative();
         if (t_no_spec != t) {
           bool in_hash = igvn.hash_delete(n);
-          assert(in_hash, "node should be in igvn hash table");
+#ifdef ASSERT
+          if (!in_hash) {
+            tty->print_cr("current graph:");
+            n->dump_bfs(MaxNodeLimit, nullptr, "S$");
+            tty->cr();
+            tty->print_cr("erroneous node:");
+            n->dump();
+            assert(false, "node should be in igvn hash table");
+          }
+#endif
           tn->set_type(t_no_spec);
           igvn.hash_insert(n);
           igvn._worklist.push(n); // give it a chance to go away
@@ -4991,8 +5011,8 @@ bool Compile::randomized_select(int count) {
 CloneMap&     Compile::clone_map()                 { return _clone_map; }
 void          Compile::set_clone_map(Dict* d)      { _clone_map._dict = d; }
 
-void NodeCloneInfo::dump() const {
-  tty->print(" {%d:%d} ", idx(), gen());
+void NodeCloneInfo::dump_on(outputStream* st) const {
+  st->print(" {%d:%d} ", idx(), gen());
 }
 
 void CloneMap::clone(Node* old, Node* nnn, int gen) {
@@ -5039,11 +5059,11 @@ int CloneMap::max_gen() const {
   return g;
 }
 
-void CloneMap::dump(node_idx_t key) const {
+void CloneMap::dump(node_idx_t key, outputStream* st) const {
   uint64_t val = value(key);
   if (val != 0) {
     NodeCloneInfo ni(val);
-    ni.dump();
+    ni.dump_on(st);
   }
 }
 

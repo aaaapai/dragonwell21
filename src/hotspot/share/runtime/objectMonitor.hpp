@@ -217,6 +217,7 @@ private:
 
   static int Knob_SpinLimit;
 
+  static ByteSize header_offset()      { return byte_offset_of(ObjectMonitor, _header); }
   static ByteSize owner_offset()       { return byte_offset_of(ObjectMonitor, _owner); }
   static ByteSize recursions_offset()  { return byte_offset_of(ObjectMonitor, _recursions); }
   static ByteSize cxq_offset()         { return byte_offset_of(ObjectMonitor, _cxq); }
@@ -363,7 +364,6 @@ private:
   // Deflation support
   bool      deflate_monitor();
   void      install_displaced_markword_in_object(const oop obj);
-  void      release_object() { _object.release(_oop_storage); _object.set_null(); }
 };
 
 #endif // SHARE_RUNTIME_OBJECTMONITOR_HPP

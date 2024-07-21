@@ -389,13 +389,13 @@ static bool offset_for(uint32_t insn1, uint32_t insn2, ptrdiff_t &byte_offset) {
   return false;
 }
 
-class Decoder : public RelocActions {
-  virtual reloc_insn adrpMem() { return &Decoder::adrpMem_impl; }
-  virtual reloc_insn adrpAdd() { return &Decoder::adrpAdd_impl; }
-  virtual reloc_insn adrpMovk() { return &Decoder::adrpMovk_impl; }
+class AArch64Decoder : public RelocActions {
+  virtual reloc_insn adrpMem() { return &AArch64Decoder::adrpMem_impl; }
+  virtual reloc_insn adrpAdd() { return &AArch64Decoder::adrpAdd_impl; }
+  virtual reloc_insn adrpMovk() { return &AArch64Decoder::adrpMovk_impl; }
 
 public:
-  Decoder(address insn_addr, uint32_t insn) : RelocActions(insn_addr, insn) {}
+  AArch64Decoder(address insn_addr, uint32_t insn) : RelocActions(insn_addr, insn) {}
 
   virtual int loadStore(address insn_addr, address &target) {
     intptr_t offset = Instruction_aarch64::sextract(_insn, 23, 5);
@@ -491,7 +491,7 @@ public:
 };
 
 address MacroAssembler::target_addr_for_insn(address insn_addr, uint32_t insn) {
-  Decoder decoder(insn_addr, insn);
+  AArch64Decoder decoder(insn_addr, insn);
   address target;
   decoder.run(insn_addr, target);
   return target;
@@ -1195,6 +1195,110 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
     ldrw(scan_temp, Address(scan_temp, itableOffsetEntry::offset_offset()));
     ldr(method_result, Address(recv_klass, scan_temp, Address::uxtw(0)));
   }
+}
+
+// Look up the method for a megamorphic invokeinterface call in a single pass over itable:
+// - check recv_klass (actual object class) is a subtype of resolved_klass from CompiledICHolder
+// - find a holder_klass (class that implements the method) vtable offset and get the method from vtable by index
+// The target method is determined by <holder_klass, itable_index>.
+// The receiver klass is in recv_klass.
+// On success, the result will be in method_result, and execution falls through.
+// On failure, execution transfers to the given label.
+void MacroAssembler::lookup_interface_method_stub(Register recv_klass,
+                                                  Register holder_klass,
+                                                  Register resolved_klass,
+                                                  Register method_result,
+                                                  Register temp_itbl_klass,
+                                                  Register scan_temp,
+                                                  int itable_index,
+                                                  Label& L_no_such_interface) {
+  // 'method_result' is only used as output register at the very end of this method.
+  // Until then we can reuse it as 'holder_offset'.
+  Register holder_offset = method_result;
+  assert_different_registers(resolved_klass, recv_klass, holder_klass, temp_itbl_klass, scan_temp, holder_offset);
+
+  int vtable_start_offset = in_bytes(Klass::vtable_start_offset());
+  int itable_offset_entry_size = itableOffsetEntry::size() * wordSize;
+  int ioffset = in_bytes(itableOffsetEntry::interface_offset());
+  int ooffset = in_bytes(itableOffsetEntry::offset_offset());
+
+  Label L_loop_search_resolved_entry, L_resolved_found, L_holder_found;
+
+  ldrw(scan_temp, Address(recv_klass, Klass::vtable_length_offset()));
+  add(recv_klass, recv_klass, vtable_start_offset + ioffset);
+  // itableOffsetEntry[] itable = recv_klass + Klass::vtable_start_offset() + sizeof(vtableEntry) * recv_klass->_vtable_len;
+  // temp_itbl_klass = itable[0]._interface;
+  int vtblEntrySize = vtableEntry::size_in_bytes();
+  assert(vtblEntrySize == wordSize, "ldr lsl shift amount must be 3");
+  ldr(temp_itbl_klass, Address(recv_klass, scan_temp, Address::lsl(exact_log2(vtblEntrySize))));
+  mov(holder_offset, zr);
+  // scan_temp = &(itable[0]._interface)
+  lea(scan_temp, Address(recv_klass, scan_temp, Address::lsl(exact_log2(vtblEntrySize))));
+
+  // Initial checks:
+  //   - if (holder_klass != resolved_klass), go to "scan for resolved"
+  //   - if (itable[0] == holder_klass), shortcut to "holder found"
+  //   - if (itable[0] == 0), no such interface
+  cmp(resolved_klass, holder_klass);
+  br(Assembler::NE, L_loop_search_resolved_entry);
+  cmp(holder_klass, temp_itbl_klass);
+  br(Assembler::EQ, L_holder_found);
+  cbz(temp_itbl_klass, L_no_such_interface);
+
+  // Loop: Look for holder_klass record in itable
+  //   do {
+  //     temp_itbl_klass = *(scan_temp += itable_offset_entry_size);
+  //     if (temp_itbl_klass == holder_klass) {
+  //       goto L_holder_found; // Found!
+  //     }
+  //   } while (temp_itbl_klass != 0);
+  //   goto L_no_such_interface // Not found.
+  Label L_search_holder;
+  bind(L_search_holder);
+    ldr(temp_itbl_klass, Address(pre(scan_temp, itable_offset_entry_size)));
+    cmp(holder_klass, temp_itbl_klass);
+    br(Assembler::EQ, L_holder_found);
+    cbnz(temp_itbl_klass, L_search_holder);
+
+  b(L_no_such_interface);
+
+  // Loop: Look for resolved_class record in itable
+  //   while (true) {
+  //     temp_itbl_klass = *(scan_temp += itable_offset_entry_size);
+  //     if (temp_itbl_klass == 0) {
+  //       goto L_no_such_interface;
+  //     }
+  //     if (temp_itbl_klass == resolved_klass) {
+  //        goto L_resolved_found;  // Found!
+  //     }
+  //     if (temp_itbl_klass == holder_klass) {
+  //        holder_offset = scan_temp;
+  //     }
+  //   }
+  //
+  Label L_loop_search_resolved;
+  bind(L_loop_search_resolved);
+    ldr(temp_itbl_klass, Address(pre(scan_temp, itable_offset_entry_size)));
+  bind(L_loop_search_resolved_entry);
+    cbz(temp_itbl_klass, L_no_such_interface);
+    cmp(resolved_klass, temp_itbl_klass);
+    br(Assembler::EQ, L_resolved_found);
+    cmp(holder_klass, temp_itbl_klass);
+    br(Assembler::NE, L_loop_search_resolved);
+    mov(holder_offset, scan_temp);
+    b(L_loop_search_resolved);
+
+  // See if we already have a holder klass. If not, go and scan for it.
+  bind(L_resolved_found);
+  cbz(holder_offset, L_search_holder);
+  mov(scan_temp, holder_offset);
+
+  // Finally, scan_temp contains holder_klass vtable offset
+  bind(L_holder_found);
+  ldrw(method_result, Address(scan_temp, ooffset - ioffset));
+  add(recv_klass, recv_klass, itable_index * wordSize + in_bytes(itableMethodEntry::method_offset())
+    - vtable_start_offset - ioffset); // substract offsets to restore the original value of recv_klass
+  ldr(method_result, Address(recv_klass, method_result, Address::uxtw(0)));
 }
 
 // virtual method calling
@@ -4156,108 +4260,117 @@ void MacroAssembler::kernel_crc32_common_fold_using_crypto_pmull(Register crc, R
     }
     add(table, table, table_offset);
 
+    // Registers v0..v7 are used as data registers.
+    // Registers v16..v31 are used as tmp registers.
     sub(buf, buf, 0x10);
-    ldrq(v1, Address(buf, 0x10));
-    ldrq(v2, Address(buf, 0x20));
-    ldrq(v3, Address(buf, 0x30));
-    ldrq(v4, Address(buf, 0x40));
-    ldrq(v5, Address(buf, 0x50));
-    ldrq(v6, Address(buf, 0x60));
-    ldrq(v7, Address(buf, 0x70));
-    ldrq(v8, Address(pre(buf, 0x80)));
+    ldrq(v0, Address(buf, 0x10));
+    ldrq(v1, Address(buf, 0x20));
+    ldrq(v2, Address(buf, 0x30));
+    ldrq(v3, Address(buf, 0x40));
+    ldrq(v4, Address(buf, 0x50));
+    ldrq(v5, Address(buf, 0x60));
+    ldrq(v6, Address(buf, 0x70));
+    ldrq(v7, Address(pre(buf, 0x80)));
 
-    movi(v25, T4S, 0);
-    mov(v25, S, 0, crc);
-    eor(v1, T16B, v1, v25);
+    movi(v31, T4S, 0);
+    mov(v31, S, 0, crc);
+    eor(v0, T16B, v0, v31);
 
-    ldrq(v0, Address(table));
+    // Register v16 contains constants from the crc table.
+    ldrq(v16, Address(table));
     b(CRC_by128_loop);
 
     align(OptoLoopAlignment);
   BIND(CRC_by128_loop);
-    pmull (v9,  T1Q, v1, v0, T1D);
-    pmull2(v10, T1Q, v1, v0, T2D);
-    ldrq(v1, Address(buf, 0x10));
-    eor3(v1, T16B, v9,  v10, v1);
+    pmull (v17,  T1Q, v0, v16, T1D);
+    pmull2(v18, T1Q, v0, v16, T2D);
+    ldrq(v0, Address(buf, 0x10));
+    eor3(v0, T16B, v17,  v18, v0);
 
-    pmull (v11, T1Q, v2, v0, T1D);
-    pmull2(v12, T1Q, v2, v0, T2D);
-    ldrq(v2, Address(buf, 0x20));
-    eor3(v2, T16B, v11, v12, v2);
+    pmull (v19, T1Q, v1, v16, T1D);
+    pmull2(v20, T1Q, v1, v16, T2D);
+    ldrq(v1, Address(buf, 0x20));
+    eor3(v1, T16B, v19, v20, v1);
 
-    pmull (v13, T1Q, v3, v0, T1D);
-    pmull2(v14, T1Q, v3, v0, T2D);
-    ldrq(v3, Address(buf, 0x30));
-    eor3(v3, T16B, v13, v14, v3);
+    pmull (v21, T1Q, v2, v16, T1D);
+    pmull2(v22, T1Q, v2, v16, T2D);
+    ldrq(v2, Address(buf, 0x30));
+    eor3(v2, T16B, v21, v22, v2);
 
-    pmull (v15, T1Q, v4, v0, T1D);
-    pmull2(v16, T1Q, v4, v0, T2D);
-    ldrq(v4, Address(buf, 0x40));
-    eor3(v4, T16B, v15, v16, v4);
+    pmull (v23, T1Q, v3, v16, T1D);
+    pmull2(v24, T1Q, v3, v16, T2D);
+    ldrq(v3, Address(buf, 0x40));
+    eor3(v3, T16B, v23, v24, v3);
 
-    pmull (v17, T1Q, v5, v0, T1D);
-    pmull2(v18, T1Q, v5, v0, T2D);
-    ldrq(v5, Address(buf, 0x50));
-    eor3(v5, T16B, v17, v18, v5);
+    pmull (v25, T1Q, v4, v16, T1D);
+    pmull2(v26, T1Q, v4, v16, T2D);
+    ldrq(v4, Address(buf, 0x50));
+    eor3(v4, T16B, v25, v26, v4);
 
-    pmull (v19, T1Q, v6, v0, T1D);
-    pmull2(v20, T1Q, v6, v0, T2D);
-    ldrq(v6, Address(buf, 0x60));
-    eor3(v6, T16B, v19, v20, v6);
+    pmull (v27, T1Q, v5, v16, T1D);
+    pmull2(v28, T1Q, v5, v16, T2D);
+    ldrq(v5, Address(buf, 0x60));
+    eor3(v5, T16B, v27, v28, v5);
 
-    pmull (v21, T1Q, v7, v0, T1D);
-    pmull2(v22, T1Q, v7, v0, T2D);
-    ldrq(v7, Address(buf, 0x70));
-    eor3(v7, T16B, v21, v22, v7);
+    pmull (v29, T1Q, v6, v16, T1D);
+    pmull2(v30, T1Q, v6, v16, T2D);
+    ldrq(v6, Address(buf, 0x70));
+    eor3(v6, T16B, v29, v30, v6);
 
-    pmull (v23, T1Q, v8, v0, T1D);
-    pmull2(v24, T1Q, v8, v0, T2D);
-    ldrq(v8, Address(pre(buf, 0x80)));
-    eor3(v8, T16B, v23, v24, v8);
+    // Reuse registers v23, v24.
+    // Using them won't block the first instruction of the next iteration.
+    pmull (v23, T1Q, v7, v16, T1D);
+    pmull2(v24, T1Q, v7, v16, T2D);
+    ldrq(v7, Address(pre(buf, 0x80)));
+    eor3(v7, T16B, v23, v24, v7);
 
     subs(len, len, 0x80);
     br(Assembler::GE, CRC_by128_loop);
 
     // fold into 512 bits
-    ldrq(v0, Address(table, 0x10));
+    // Use v31 for constants because v16 can be still in use.
+    ldrq(v31, Address(table, 0x10));
 
-    pmull (v10,  T1Q, v1, v0, T1D);
-    pmull2(v11, T1Q, v1, v0, T2D);
-    eor3(v1, T16B, v10, v11, v5);
+    pmull (v17,  T1Q, v0, v31, T1D);
+    pmull2(v18, T1Q, v0, v31, T2D);
+    eor3(v0, T16B, v17, v18, v4);
 
-    pmull (v12, T1Q, v2, v0, T1D);
-    pmull2(v13, T1Q, v2, v0, T2D);
-    eor3(v2, T16B, v12, v13, v6);
+    pmull (v19, T1Q, v1, v31, T1D);
+    pmull2(v20, T1Q, v1, v31, T2D);
+    eor3(v1, T16B, v19, v20, v5);
 
-    pmull (v14, T1Q, v3, v0, T1D);
-    pmull2(v15, T1Q, v3, v0, T2D);
-    eor3(v3, T16B, v14, v15, v7);
+    pmull (v21, T1Q, v2, v31, T1D);
+    pmull2(v22, T1Q, v2, v31, T2D);
+    eor3(v2, T16B, v21, v22, v6);
 
-    pmull (v16, T1Q, v4, v0, T1D);
-    pmull2(v17, T1Q, v4, v0, T2D);
-    eor3(v4, T16B, v16, v17, v8);
+    pmull (v23, T1Q, v3, v31, T1D);
+    pmull2(v24, T1Q, v3, v31, T2D);
+    eor3(v3, T16B, v23, v24, v7);
 
     // fold into 128 bits
-    ldrq(v5, Address(table, 0x20));
-    pmull (v10, T1Q, v1, v5, T1D);
-    pmull2(v11, T1Q, v1, v5, T2D);
-    eor3(v4, T16B, v4, v10, v11);
+    // Use v17 for constants because v31 can be still in use.
+    ldrq(v17, Address(table, 0x20));
+    pmull (v25, T1Q, v0, v17, T1D);
+    pmull2(v26, T1Q, v0, v17, T2D);
+    eor3(v3, T16B, v3, v25, v26);
 
-    ldrq(v6, Address(table, 0x30));
-    pmull (v12, T1Q, v2, v6, T1D);
-    pmull2(v13, T1Q, v2, v6, T2D);
-    eor3(v4, T16B, v4, v12, v13);
+    // Use v18 for constants because v17 can be still in use.
+    ldrq(v18, Address(table, 0x30));
+    pmull (v27, T1Q, v1, v18, T1D);
+    pmull2(v28, T1Q, v1, v18, T2D);
+    eor3(v3, T16B, v3, v27, v28);
 
-    ldrq(v7, Address(table, 0x40));
-    pmull (v14, T1Q, v3, v7, T1D);
-    pmull2(v15, T1Q, v3, v7, T2D);
-    eor3(v1, T16B, v4, v14, v15);
+    // Use v19 for constants because v18 can be still in use.
+    ldrq(v19, Address(table, 0x40));
+    pmull (v29, T1Q, v2, v19, T1D);
+    pmull2(v30, T1Q, v2, v19, T2D);
+    eor3(v0, T16B, v3, v29, v30);
 
     add(len, len, 0x80);
     add(buf, buf, 0x10);
 
-    mov(tmp0, v1, D, 0);
-    mov(tmp1, v1, D, 1);
+    mov(tmp0, v0, D, 0);
+    mov(tmp1, v0, D, 1);
 }
 
 SkipIfEqual::SkipIfEqual(
@@ -4317,8 +4430,30 @@ void MacroAssembler::load_method_holder(Register holder, Register method) {
   ldr(holder, Address(holder, ConstantPool::pool_holder_offset()));          // InstanceKlass*
 }
 
+// Loads the obj's Klass* into dst.
+// Preserves all registers (incl src, rscratch1 and rscratch2).
+void MacroAssembler::load_nklass_compact(Register dst, Register src) {
+  assert(UseCompactObjectHeaders, "expects UseCompactObjectHeaders");
+
+  Label fast;
+
+  // Check if we can take the (common) fast path, if obj is unlocked.
+  ldr(dst, Address(src, oopDesc::mark_offset_in_bytes()));
+  tbz(dst, exact_log2(markWord::monitor_value), fast);
+
+  // Fetch displaced header
+  ldr(dst, Address(dst, OM_OFFSET_NO_MONITOR_VALUE_TAG(header)));
+
+  // Fast-path: shift to get narrowKlass.
+  bind(fast);
+  lsr(dst, dst, markWord::klass_shift);
+}
+
 void MacroAssembler::load_klass(Register dst, Register src) {
-  if (UseCompressedClassPointers) {
+  if (UseCompactObjectHeaders) {
+    load_nklass_compact(dst, src);
+    decode_klass_not_null(dst);
+  } else if (UseCompressedClassPointers) {
     ldrw(dst, Address(src, oopDesc::klass_offset_in_bytes()));
     decode_klass_not_null(dst);
   } else {
@@ -4357,8 +4492,13 @@ void MacroAssembler::load_mirror(Register dst, Register method, Register tmp1, R
 }
 
 void MacroAssembler::cmp_klass(Register oop, Register trial_klass, Register tmp) {
+  assert_different_registers(oop, trial_klass, tmp);
   if (UseCompressedClassPointers) {
-    ldrw(tmp, Address(oop, oopDesc::klass_offset_in_bytes()));
+    if (UseCompactObjectHeaders) {
+      load_nklass_compact(tmp, oop);
+    } else {
+      ldrw(tmp, Address(oop, oopDesc::klass_offset_in_bytes()));
+    }
     if (CompressedKlassPointers::base() == nullptr) {
       cmp(trial_klass, tmp, LSL, CompressedKlassPointers::shift());
       return;
@@ -4375,9 +4515,26 @@ void MacroAssembler::cmp_klass(Register oop, Register trial_klass, Register tmp)
   cmp(trial_klass, tmp);
 }
 
+void MacroAssembler::cmp_klass(Register src, Register dst, Register tmp1, Register tmp2) {
+  if (UseCompactObjectHeaders) {
+    load_nklass_compact(tmp1, src);
+    load_nklass_compact(tmp2, dst);
+    cmpw(tmp1, tmp2);
+  } else if (UseCompressedClassPointers) {
+    ldrw(tmp1, Address(src, oopDesc::klass_offset_in_bytes()));
+    ldrw(tmp2, Address(dst, oopDesc::klass_offset_in_bytes()));
+    cmpw(tmp1, tmp2);
+  } else {
+    ldr(tmp1, Address(src, oopDesc::klass_offset_in_bytes()));
+    ldr(tmp2, Address(dst, oopDesc::klass_offset_in_bytes()));
+    cmp(tmp1, tmp2);
+  }
+}
+
 void MacroAssembler::store_klass(Register dst, Register src) {
   // FIXME: Should this be a store release?  concurrent gcs assumes
   // klass length is valid if klass field is not null.
+  assert(!UseCompactObjectHeaders, "not with compact headers");
   if (UseCompressedClassPointers) {
     encode_klass_not_null(src);
     strw(src, Address(dst, oopDesc::klass_offset_in_bytes()));
@@ -4387,6 +4544,7 @@ void MacroAssembler::store_klass(Register dst, Register src) {
 }
 
 void MacroAssembler::store_klass_gap(Register dst, Register src) {
+  assert(!UseCompactObjectHeaders, "not with compact headers");
   if (UseCompressedClassPointers) {
     // Store to klass gap in destination
     strw(src, Address(dst, oopDesc::klass_gap_offset_in_bytes()));
@@ -5019,12 +5177,22 @@ address MacroAssembler::arrays_equals(Register a1, Register a2, Register tmp3,
   Label DONE, SAME;
   Register tmp1 = rscratch1;
   Register tmp2 = rscratch2;
-  Register cnt2 = tmp2;  // cnt2 only used in array length compare
   int elem_per_word = wordSize/elem_size;
   int log_elem_size = exact_log2(elem_size);
+  int klass_offset  = arrayOopDesc::klass_offset_in_bytes();
   int length_offset = arrayOopDesc::length_offset_in_bytes();
   int base_offset
     = arrayOopDesc::base_offset_in_bytes(elem_size == 2 ? T_CHAR : T_BYTE);
+  // When the length offset is not aligned to 8 bytes,
+  // then we align it down. This is valid because the new
+  // offset will always be the klass which is the same
+  // for type arrays.
+  int start_offset = align_down(length_offset, BytesPerWord);
+  int extra_length = base_offset - start_offset;
+  assert(start_offset == length_offset || start_offset == klass_offset,
+         "start offset must be 8-byte-aligned or be the klass offset");
+  assert(base_offset != start_offset, "must include the length field");
+  extra_length = extra_length / elem_size; // We count in elements, not bytes.
   int stubBytesThreshold = 3 * 64 + (UseSIMDForArrayEquals ? 0 : 16);
 
   assert(elem_size == 1 || elem_size == 2, "must be char or byte");
@@ -5058,11 +5226,10 @@ address MacroAssembler::arrays_equals(Register a1, Register a2, Register tmp3,
     //      return false;
     bind(A_IS_NOT_NULL);
     ldrw(cnt1, Address(a1, length_offset));
-    ldrw(cnt2, Address(a2, length_offset));
-    eorw(tmp5, cnt1, cnt2);
-    cbnzw(tmp5, DONE);
-    lea(a1, Address(a1, base_offset));
-    lea(a2, Address(a2, base_offset));
+    // Increase loop counter by diff between base- and actual start-offset.
+    addw(cnt1, cnt1, extra_length);
+    lea(a1, Address(a1, start_offset));
+    lea(a2, Address(a2, start_offset));
     // Check for short strings, i.e. smaller than wordSize.
     subs(cnt1, cnt1, elem_per_word);
     br(Assembler::LT, SHORT);
@@ -5125,18 +5292,18 @@ address MacroAssembler::arrays_equals(Register a1, Register a2, Register tmp3,
     cbz(a1, DONE);
     ldrw(cnt1, Address(a1, length_offset));
     cbz(a2, DONE);
-    ldrw(cnt2, Address(a2, length_offset));
+    // Increase loop counter by diff between base- and actual start-offset.
+    addw(cnt1, cnt1, extra_length);
+
     // on most CPUs a2 is still "locked"(surprisingly) in ldrw and it's
     // faster to perform another branch before comparing a1 and a2
     cmp(cnt1, (u1)elem_per_word);
     br(LE, SHORT); // short or same
-    ldr(tmp3, Address(pre(a1, base_offset)));
+    ldr(tmp3, Address(pre(a1, start_offset)));
     subs(zr, cnt1, stubBytesThreshold);
     br(GE, STUB);
-    ldr(tmp4, Address(pre(a2, base_offset)));
+    ldr(tmp4, Address(pre(a2, start_offset)));
     sub(tmp5, zr, cnt1, LSL, 3 + log_elem_size);
-    cmp(cnt2, cnt1);
-    br(NE, DONE);
 
     // Main 16 byte comparison loop with 2 exits
     bind(NEXT_DWORD); {
@@ -5168,9 +5335,7 @@ address MacroAssembler::arrays_equals(Register a1, Register a2, Register tmp3,
     b(LAST_CHECK);
 
     bind(STUB);
-    ldr(tmp4, Address(pre(a2, base_offset)));
-    cmp(cnt2, cnt1);
-    br(NE, DONE);
+    ldr(tmp4, Address(pre(a2, start_offset)));
     if (elem_size == 2) { // convert to byte counter
       lsl(cnt1, cnt1, 1);
     }
@@ -5191,12 +5356,9 @@ address MacroAssembler::arrays_equals(Register a1, Register a2, Register tmp3,
     mov(result, a2);
     b(DONE);
     bind(SHORT);
-    cmp(cnt2, cnt1);
-    br(NE, DONE);
-    cbz(cnt1, SAME);
     sub(tmp5, zr, cnt1, LSL, 3 + log_elem_size);
-    ldr(tmp3, Address(a1, base_offset));
-    ldr(tmp4, Address(a2, base_offset));
+    ldr(tmp3, Address(a1, start_offset));
+    ldr(tmp4, Address(a2, start_offset));
     bind(LAST_CHECK);
     eor(tmp4, tmp3, tmp4);
     lslv(tmp5, tmp4, tmp5);

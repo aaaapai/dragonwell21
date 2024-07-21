@@ -298,6 +298,10 @@ void MonitorExitStub::emit_code(LIR_Assembler* ce) {
   __ b(_continuation);
 }
 
+void LoadKlassStub::emit_code(LIR_Assembler* ce) {
+  // Currently not needed.
+  Unimplemented();
+}
 
 // Implementation of patching:
 // - Copy the code at given offset to an inlined buffer (first the bytes, then the number of bytes).
@@ -456,6 +460,9 @@ void ArrayCopyStub::emit_code(LIR_Assembler* ce) {
   __ extsw(R7_ARG5, length()->as_register());
 
   ce->emit_static_call_stub();
+  if (ce->compilation()->bailed_out()) {
+    return; // CodeCache is full
+  }
 
   bool success = ce->emit_trampoline_stub_for_call(SharedRuntime::get_resolve_static_call_stub());
   if (!success) { return; }

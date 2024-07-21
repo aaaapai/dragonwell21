@@ -53,6 +53,9 @@
   product(bool, StressCCP, false, DIAGNOSTIC,                               \
           "Randomize worklist traversal in CCP")                            \
                                                                             \
+  product(bool, StressIncrementalInlining, false, DIAGNOSTIC,               \
+          "Randomize the incremental inlining decision")                    \
+                                                                            \
   product(uint, StressSeed, 0, DIAGNOSTIC,                                  \
           "Seed for randomized stress testing (if unset, a random one is "  \
           "generated). The seed is recorded in the compilation log, if "    \
@@ -771,6 +774,10 @@
                                                                             \
   product(bool, VerifyReceiverTypes, trueInDebug, DIAGNOSTIC,               \
           "Verify receiver types at runtime")                               \
+                                                                            \
+  product(bool, UseStoreStoreForCtor, true, DIAGNOSTIC,                     \
+          "Use StoreStore barrier instead of Release barrier at the end "   \
+          "of constructors")                                                \
 
 // end of C2_FLAGS
 
