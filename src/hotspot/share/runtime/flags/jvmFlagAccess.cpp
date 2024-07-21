@@ -33,6 +33,9 @@
 #include "utilities/macros.hpp"
 #include "utilities/ostream.hpp"
 
+#pragma warning(push)
+#pragma warning(disable: 4789)
+
 template<typename T, typename EVENT>
 static void trace_flag_changed(JVMFlag* flag, const T old_value, const T new_value, const JVMFlagOrigin origin) {
   EVENT e;
@@ -391,3 +394,5 @@ void JVMFlagAccess::print_range(outputStream* st, const JVMFlag* flag) {
     }
   }
 }
+
+#pragma warning(pop)

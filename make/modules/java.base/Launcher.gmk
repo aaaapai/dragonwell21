@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2020, 2024, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -35,7 +35,7 @@ JAVA_RCFLAGS ?= -I$(TOPDIR)/src/java.base/windows/native/launcher/icons
 ################################################################################
 
 $(eval $(call SetupBuildLauncher, java, \
-    CFLAGS := -DEXPAND_CLASSPATH_WILDCARDS -DENABLE_ARG_FILES, \
+    CFLAGS := -DMC_ENTRY_POINT -DEXPAND_CLASSPATH_WILDCARDS -DENABLE_ARG_FILES, \
     EXTRA_RCFLAGS := $(JAVA_RCFLAGS), \
     VERSION_INFO_RESOURCE := $(JAVA_VERSION_INFO_RESOURCE), \
     OPTIMIZATION := HIGH, \
@@ -43,7 +43,7 @@ $(eval $(call SetupBuildLauncher, java, \
 
 ifeq ($(call isTargetOs, windows), true)
   $(eval $(call SetupBuildLauncher, javaw, \
-      CFLAGS := -DJAVAW -DEXPAND_CLASSPATH_WILDCARDS -DENABLE_ARG_FILES, \
+      CFLAGS := -DMC_ENTRY_POINT -DJAVAW -DEXPAND_CLASSPATH_WILDCARDS -DENABLE_ARG_FILES, \
       EXTRA_RCFLAGS := $(JAVA_RCFLAGS), \
       VERSION_INFO_RESOURCE := $(JAVA_VERSION_INFO_RESOURCE), \
   ))

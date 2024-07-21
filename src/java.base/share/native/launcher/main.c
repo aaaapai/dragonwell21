@@ -34,6 +34,15 @@
 #include "jli_util.h"
 #include "jni.h"
 
+#ifdef MC_ENTRY_POINT
+
+// https://docs.nvidia.com/gameworks/content/technologies/desktop/optimus.htm
+_declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+// https://gpuopen.com/learn/amdpowerxpressrequesthighperformance
+_declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
+
+#endif /* MC_ENTRY_POINT */
+
 /*
  * Entry point.
  */

@@ -380,14 +380,14 @@ AC_DEFUN([FLAGS_SETUP_OPTIMIZATION],
     C_O_FLAG_DEBUG_JVM=""
     C_O_FLAG_NONE="-qnoopt"
   elif test "x$TOOLCHAIN_TYPE" = xmicrosoft; then
-    C_O_FLAG_HIGHEST_JVM="-O2 -Oy-"
-    C_O_FLAG_HIGHEST="-O2"
-    C_O_FLAG_HI="-O1"
-    C_O_FLAG_NORM="-O1"
-    C_O_FLAG_DEBUG="-Od"
+    C_O_FLAG_HIGHEST_JVM="/O2 /Oy- /GL /Ob3 /Gw"
+    C_O_FLAG_HIGHEST="/O2 /GL /Ob3 /Gw"
+    C_O_FLAG_HI="/O2 /GL /Ob3 /Gw"
+    C_O_FLAG_NORM="/O1"
+    C_O_FLAG_DEBUG="/Od"
     C_O_FLAG_DEBUG_JVM=""
-    C_O_FLAG_NONE="-Od"
-    C_O_FLAG_SIZE="-Os"
+    C_O_FLAG_NONE="/Od"
+    C_O_FLAG_SIZE="/Os"
   fi
 
   # Now copy to C++ flags
