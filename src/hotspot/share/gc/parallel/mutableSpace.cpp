@@ -243,7 +243,6 @@ void MutableSpace::object_iterate_impl(ObjectClosure* cl) {
     // They are essentially dead, so skipping them
     if (!obj->is_forwarded()) {
       cl->do_object(obj);
-<<<<<<< HEAD
       p += obj->size();
     } else {
       assert(obj->forwardee() != obj, "must not be self-forwarded");
@@ -264,7 +263,6 @@ void MutableSpace::object_iterate(ObjectClosure* cl) {
     object_iterate_impl<true>(cl);
   } else {
     object_iterate_impl<false>(cl);
-=======
     }
 #ifdef ASSERT
     else {
@@ -272,7 +270,6 @@ void MutableSpace::object_iterate(ObjectClosure* cl) {
     }
 #endif
     p += cast_to_oop(p)->size();
->>>>>>> jdk-21.0.4+7
   }
 }
 
