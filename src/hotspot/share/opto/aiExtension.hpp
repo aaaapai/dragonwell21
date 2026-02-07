@@ -48,10 +48,6 @@ class AIExtUnit : public CHeapObj<mtCompiler> {
   // Optional parameter list.
   const char* _param_list;
 
-  // Comparator for the AI-Extension unit library entry.
-  static int compare(const AIExtUnit* const& u1, const AIExtUnit* const& u2);
-
-
   // Handle of the loaded AI-Extension unit library.
   void* _handle;
 
@@ -61,6 +57,9 @@ class AIExtUnit : public CHeapObj<mtCompiler> {
   // Parses the given argument string to construct a unit.
   // The returned unit should be properly deleted before the VM exits.
   static AIExtUnit* parse_from_arg(const char* arg);
+
+  // Comparator for the AI-Extension unit library entry.
+  static int compare(const AIExtUnit* const& u1, const AIExtUnit* const& u2);
 
   AIExtUnit(const char* feature, const char* version, const char* param_list,
             aiext_handle_t aiext_handle)
