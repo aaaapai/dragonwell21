@@ -54,12 +54,12 @@ class AIExtUnit : public CHeapObj<mtCompiler> {
   // Handle for identifying AI-Extension units.
   aiext_handle_t _aiext_handle;
 
+  // Comparator for the AI-Extension unit library entry.
+  static int compare(const AIExtUnit* const& u1, const AIExtUnit* const& u2);
+
   // Parses the given argument string to construct a unit.
   // The returned unit should be properly deleted before the VM exits.
   static AIExtUnit* parse_from_arg(const char* arg);
-
-  // Comparator for the AI-Extension unit library entry.
-  static int compare(const AIExtUnit* const& u1, const AIExtUnit* const& u2);
 
   AIExtUnit(const char* feature, const char* version, const char* param_list,
             aiext_handle_t aiext_handle)
