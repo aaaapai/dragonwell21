@@ -48,6 +48,10 @@ class AIExtUnit : public CHeapObj<mtCompiler> {
   // Optional parameter list.
   const char* _param_list;
 
+  // Comparator for the AI-Extension unit library entry.
+  static int compare(const AIExtUnit* const& u1, const AIExtUnit* const& u2);
+
+
   // Handle of the loaded AI-Extension unit library.
   void* _handle;
 
@@ -85,9 +89,6 @@ class AIExtUnit : public CHeapObj<mtCompiler> {
       os::dll_unload(_handle);
     }
   }
-
-  // Comparator for the AI-Extension unit library entry.
-  static int compare(AIExtUnit* const& u1, AIExtUnit* const& u2);
 
   // Returns the feature name.
   const char* feature() const { return _feature; }
